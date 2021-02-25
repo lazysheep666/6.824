@@ -1,1 +1,4 @@
-- [x] lab1 mr
+# 6.824.
+
+## Compelete List
+- [x] Lab1 Map Reduce
