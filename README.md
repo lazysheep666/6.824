@@ -1,4 +1,5 @@
 # 6.824.
 
-## Compelete List
+Compelete List
+
 - [x] Lab1 Map Reduce
