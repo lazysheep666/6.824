@@ -52,7 +52,6 @@ timeout -k 2s 180s ../mrworker ../../mrapps/wc.so &
 timeout -k 2s 180s ../mrworker ../../mrapps/wc.so &
 
 # wait for the coordinator to exit.
-echo "wait"
 wait $pid
 
 # since workers are required to exit when a job is completely finished,
@@ -103,7 +102,7 @@ wait
 #########################################################
 echo '***' Starting map parallelism test.
 
-rm -f mr-out* mr-worker*
+rm -f mr-*
 
 timeout -k 2s 180s ../mrcoordinator ../pg*txt &
 sleep 1
@@ -134,7 +133,7 @@ wait
 #########################################################
 echo '***' Starting reduce parallelism test.
 
-rm -f mr-out* mr-worker*
+rm -f mr-*
 
 timeout -k 2s 180s ../mrcoordinator ../pg*txt &
 sleep 1
@@ -157,7 +156,7 @@ wait
 #########################################################
 echo '***' Starting job count test.
 
-rm -f mr-out* mr-worker*
+rm -f mr-*
 
 timeout -k 2s 180s ../mrcoordinator ../pg*txt &
 sleep 1
