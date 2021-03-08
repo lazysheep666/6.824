@@ -222,6 +222,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	var term int
 	var isleader bool
+
 	// Your code here (2A).
 	if rf.role == LEADER {
 		isleader = true
