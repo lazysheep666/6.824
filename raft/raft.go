@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"math/rand"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -100,122 +99,6 @@ func (rf *Raft) changeRole(role Role) {
 	}
 }
 
-func randElectionTimeout() time.Duration {
-	r := time.Duration(rand.Int63()) % ElectionTimeout
-	return ElectionTimeout + r
-}
-
-func (rf *Raft) resetElectionTimer() {
-	if !rf.electionTimer.Stop() {
-		select {
-		case <-rf.electionTimer.C:
-		default:
-		}
-	}
-	rf.electionTimer.Reset(randElectionTimeout())
-}
-
-func (rf *Raft) resetHeartbeatTimer() {
-	if !rf.heartbeatTimer.Stop() {
-		select {
-		case <-rf.heartbeatTimer.C:
-		default:
-		}
-	}
-	rf.heartbeatTimer.Reset(HeartBeatTimeout)
-}
-
-func (rf *Raft) sendHeartbeat() {
-	rf.mu.Lock()
-	if rf.role != LEADER {
-		rf.mu.Unlock()
-		return
-	}
-	currentTerm := rf.currentTerm
-	rf.resetHeartbeatTimer()
-	rf.mu.Unlock()
-	for server := 0; server < len(rf.peers); server++ {
-		if server == rf.me {
-			continue
-		}
-		go func(server int) {
-			args := &AppendEntriesArgs{}
-			args.Term = currentTerm
-			args.LeaderId = rf.me
-			reply := &AppendEntriesReply{}
-			rf.sendAppendEntries(server, args, reply)
-			rf.mu.Lock()
-			if reply.Success == false && rf.role == LEADER {
-				rf.changeRole(FOLLOWER)
-				rf.voteFor = -1
-				rf.currentTerm = reply.Term
-			}
-			rf.mu.Unlock()
-		}(server)
-	}
-}
-
-func (rf *Raft) startElection() {
-	rf.mu.Lock()
-	role := rf.role
-	if role == LEADER {
-		rf.resetElectionTimer()
-		rf.mu.Unlock()
-		return
-	}
-
-	rf.changeRole(CANDIDATE)
-	currentTerm := rf.currentTerm
-	DPrintf("Server %d start Election in term %d\n", rf.me, rf.currentTerm)
-	args := &RequestVoteArgs{}
-	args.CandidateId = rf.me
-	args.Term = rf.currentTerm
-	rf.mu.Unlock()
-
-	finished := 1
-	granted := 1
-	votesCh := make(chan bool, len(rf.peers))
-
-	for server := 0; server < len(rf.peers); server++ {
-		if server == rf.me {
-			continue
-		}
-		go func(server int, ch chan bool, args *RequestVoteArgs) {
-			DPrintf("Server %d send vote request to %d", rf.me, server)
-			reply := &RequestVoteReply{}
-			rf.sendRequestVote(server, args, reply)
-			ch <- reply.VoteGranted
-			rf.mu.Lock()
-			if reply.Term > currentTerm {
-				rf.voteFor = -1
-			}
-			rf.mu.Unlock()
-		}(server, votesCh, args)
-	}
-
-	for {
-		r := <-votesCh
-		finished += 1
-		if r == true {
-			granted += 1
-		}
-		if finished == len(rf.peers) || granted > len(rf.peers)/2 || finished-granted > len(rf.peers)/2 {
-			break
-		}
-	}
-
-	rf.mu.Lock()
-	if args.Term == rf.currentTerm && granted >= len(rf.peers)/2+1 && rf.role == CANDIDATE {
-		DPrintf("Server %d become a leader in term %d \n", rf.me, args.Term)
-		rf.changeRole(LEADER)
-	} else {
-		if rf.role != LEADER {
-			DPrintf("Server %d fail to become a leader in term %d \n", rf.me, args.Term)
-		}
-	}
-	rf.mu.Unlock()
-}
-
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -292,63 +175,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-}
-
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	currentTerm := rf.currentTerm
-	voteFor := rf.voteFor
-
-	reply.VoteGranted = false
-	vote := false
-
-	if args.Term > currentTerm {
-		vote = true
-	} else if args.Term == currentTerm {
-		if voteFor == -1 || voteFor == args.CandidateId {
-			vote = true
-		}
-	}
-	rf.currentTerm = max(currentTerm, args.Term)
-
-	if vote {
-		reply.VoteGranted = true
-		rf.voteFor = args.CandidateId
-		rf.changeRole(FOLLOWER)
-		DPrintf("Server %d agree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
-	} else {
-		reply.VoteGranted = false
-		DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
-	}
-	reply.Term = rf.currentTerm
-}
-
 type AppendEntriesArgs struct {
 	LeaderId int
 	Term     int
@@ -370,54 +196,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("Server %d receive heartbeat from %d in term %d \n", rf.me, args.LeaderId, args.Term)
 		rf.changeRole(FOLLOWER)
 		success = true
+		rf.voteFor = args.Term
 	}
 	rf.currentTerm = max(rf.currentTerm, args.Term)
 	reply.Term = rf.currentTerm
 	reply.Success = success
-}
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	//rpcTimer := time.NewTimer(RPCTimeout)
-	//ch := make(chan bool)
-	//go func() {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	//ch <- ok
-	//}()
-	//select {
-	//case <-rpcTimer.C:
-	//	return false
-	//case ok := <-ch:
-	return ok
-	//}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
