@@ -73,7 +73,6 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -82,6 +81,19 @@ type Raft struct {
 	currentTerm    int
 	heartbeatTimer *time.Timer
 	electionTimer  *time.Timer
+	logEntries     []LogEntry
+	commitIndex    int
+	lastApplied    int
+	nextIndex      []int
+	matchIndex     []int
+	applyChan      chan ApplyMsg
+	applyCon       *sync.Cond
+}
+
+type LogEntry struct {
+	Term    int
+	Index   int
+	Command interface{}
 }
 
 func (rf *Raft) changeRole(role Role) {
@@ -175,39 +187,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-type AppendEntriesArgs struct {
-	LeaderId int
-	Term     int
-}
-type AppendEntriesReply struct {
-	Term    int
-	Success bool
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	success := false
-
-	if rf.currentTerm > args.Term {
-
-	} else {
-		DPrintf("Server %d receive heartbeat from %d in term %d \n", rf.me, args.LeaderId, args.Term)
-		rf.changeRole(FOLLOWER)
-		success = true
-		rf.voteFor = args.Term
-	}
-	rf.currentTerm = max(rf.currentTerm, args.Term)
-	reply.Term = rf.currentTerm
-	reply.Success = success
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
-}
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -225,11 +204,51 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	isLeader := rf.role == LEADER
 
-	// Your code here (2B).
+	if isLeader {
+		isLeader = true
+		log := LogEntry{}
+		log.Command = command
+		log.Term = rf.currentTerm
+		log.Index = len(rf.logEntries)
+		index = log.Index
+		term = log.Term
+		rf.logEntries = append(rf.logEntries, log)
+		rf.matchIndex[rf.me] = len(rf.logEntries) - 1
+		rf.nextIndex[rf.me] = len(rf.logEntries)
+		// reset heartbeat before sending append entry request
+		rf.resetHeartbeatTimer()
+		// sending append entry request
+		//TODO
 
+	}
+	rf.mu.Unlock()
 	return index, term, isLeader
+}
+
+// Apply the log when log is committed
+func (rf *Raft) doApplyMsg() {
+	for {
+		rf.mu.Lock()
+		if rf.lastApplied >= rf.commitIndex {
+			rf.applyCon.Wait()
+		}
+		for s := rf.lastApplied + 1; s <= rf.commitIndex; s++ {
+			DPrintf("Server %d apply log %d \n", rf.me, s)
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logEntries[s].Command,
+				CommandIndex: s,
+			}
+			rf.mu.Unlock()
+			rf.applyChan <- applyMsg
+			rf.mu.Lock()
+			rf.lastApplied = s
+		}
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -287,12 +306,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 	rf.role = FOLLOWER
 	rf.currentTerm = 0
-	// Your initialization code here (2A, 2B, 2C).
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.applyChan = applyCh
+    rf.applyCon = sync.NewCond(&rf.mu)
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex = append(rf.nextIndex, 1)
+		rf.matchIndex = append(rf.matchIndex, 0)
+	}
+	emptyLog := LogEntry{
+		Term:    0,
+		Index:   0,
+		Command: nil,
+	}
+	rf.logEntries = append(rf.logEntries, emptyLog)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
+	// start ticker goroutine to start elections and send heartbeat
 	go func() {
 		for {
 			select {
@@ -303,6 +335,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 		}
 	}()
+
+	// apply log when it is committed
+	go rf.doApplyMsg()
 
 	return rf
 }
