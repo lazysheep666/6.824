@@ -61,7 +61,6 @@ const (
 const (
 	ElectionTimeout  = time.Millisecond * 300
 	HeartBeatTimeout = time.Millisecond * 150
-	RPCTimeout       = time.Millisecond * 100
 )
 
 //
@@ -105,10 +104,26 @@ func (rf *Raft) changeRole(role Role) {
 	} else if role == FOLLOWER {
 		rf.resetElectionTimer()
 	} else if role == LEADER {
+		lastIdx := rf.getLastLog().Index
+		for i, _ := range rf.nextIndex {
+			rf.nextIndex[i] = lastIdx + 1
+			rf.matchIndex[i] = 0
+		}
 		rf.resetHeartbeatTimer()
 	} else {
 		panic("Unknown role \n")
 	}
+}
+
+func (rf *Raft) getLastLog() LogEntry {
+	entry := LogEntry{}
+	if len(rf.logEntries) == 0 {
+		entry.Term = 0
+		entry.Index = 0
+	} else {
+		entry = rf.logEntries[len(rf.logEntries)-1]
+	}
+	return entry
 }
 
 // return currentTerm and whether this server
@@ -212,17 +227,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		log := LogEntry{}
 		log.Command = command
 		log.Term = rf.currentTerm
-		log.Index = len(rf.logEntries)
+		log.Index = len(rf.logEntries) + 1
 		index = log.Index
 		term = log.Term
 		rf.logEntries = append(rf.logEntries, log)
-		rf.matchIndex[rf.me] = len(rf.logEntries) - 1
-		rf.nextIndex[rf.me] = len(rf.logEntries)
 		// reset heartbeat before sending append entry request
 		rf.resetHeartbeatTimer()
 		// sending append entry request
-		//TODO
-
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			go rf.requestAppendEntries(i, false)
+		}
 	}
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -239,7 +256,7 @@ func (rf *Raft) doApplyMsg() {
 			DPrintf("Server %d apply log %d \n", rf.me, s)
 			applyMsg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logEntries[s].Command,
+				Command:      rf.logEntries[s-1].Command,
 				CommandIndex: s,
 			}
 			rf.mu.Unlock()
@@ -309,18 +326,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyChan = applyCh
-    rf.applyCon = sync.NewCond(&rf.mu)
+	rf.applyCon = sync.NewCond(&rf.mu)
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex = append(rf.nextIndex, 1)
 		rf.matchIndex = append(rf.matchIndex, 0)
 	}
-	emptyLog := LogEntry{
-		Term:    0,
-		Index:   0,
-		Command: nil,
-	}
-	rf.logEntries = append(rf.logEntries, emptyLog)
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// RPC Args
 type RequestVoteArgs struct {
 	Term         int
 	CandidateId  int
@@ -12,28 +13,32 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
+// RPC Reply
 type RequestVoteReply struct {
 	Term        int
 	VoteGranted bool
 }
 
+// RPC Call
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	currentTerm := rf.currentTerm
 	voteFor := rf.voteFor
 
-	reply.VoteGranted = false
 	vote := false
+	isLogUpdate := rf.checkLogUpdate(args.LastLogIndex, args.LastLogTerm)
 
+	// refuse to vote if currentTerm > args.term
 	if args.Term > currentTerm {
 		vote = true
 	} else if args.Term == currentTerm {
-		if voteFor == -1 || voteFor == args.CandidateId {
+		if (voteFor == -1 || voteFor == args.CandidateId) && isLogUpdate {
 			vote = true
 		}
+	} else {
+		vote = isLogUpdate
 	}
 	rf.currentTerm = max(currentTerm, args.Term)
 
@@ -49,16 +54,31 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 }
 
+// Send RPC Call
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
+// Check if the candidate's log is up to date
+func (rf *Raft) checkLogUpdate(srcLastLogIdx int, srcLastLogTerm int) bool {
+	lastLog := rf.getLastLog()
+	if lastLog.Term > srcLastLogTerm {
+		return false
+	} else if lastLog.Term < srcLastLogTerm {
+		return true
+	} else {
+		return srcLastLogIdx >= lastLog.Index
+	}
+}
+
+// Random the election time
 func randElectionTimeout() time.Duration {
 	r := time.Duration(rand.Int63()) % ElectionTimeout
 	return ElectionTimeout + r
 }
 
+// Reset election timer
 func (rf *Raft) resetElectionTimer() {
 	if !rf.electionTimer.Stop() {
 		select {
@@ -69,19 +89,14 @@ func (rf *Raft) resetElectionTimer() {
 	rf.electionTimer.Reset(randElectionTimeout())
 }
 
-func (rf *Raft) resetHeartbeatTimer() {
-	if !rf.heartbeatTimer.Stop() {
-		select {
-		case <-rf.heartbeatTimer.C:
-		default:
-		}
-	}
-	rf.heartbeatTimer.Reset(HeartBeatTimeout)
-}
-
+// Follower start election when election timer timeout
+// and become candidate
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	role := rf.role
+	lastLog := rf.getLastLog()
+
+	// Leader do not need to start election
 	if role == LEADER {
 		rf.resetElectionTimer()
 		rf.mu.Unlock()
@@ -90,10 +105,7 @@ func (rf *Raft) startElection() {
 
 	rf.changeRole(CANDIDATE)
 	currentTerm := rf.currentTerm
-	DPrintf("Server %d start Election in term %d\n", rf.me, rf.currentTerm)
-	args := &RequestVoteArgs{}
-	args.CandidateId = rf.me
-	args.Term = rf.currentTerm
+	DPrintf("Server %d start Election in term %d\n at %v", rf.me, rf.currentTerm, time.Now())
 	rf.mu.Unlock()
 
 	finished := 1
@@ -104,17 +116,25 @@ func (rf *Raft) startElection() {
 		if server == rf.me {
 			continue
 		}
-		go func(server int, ch chan bool, args *RequestVoteArgs) {
+		// Send vote request concurrently
+		go func(server int, ch chan bool) {
 			DPrintf("Server %d send vote request to %d", rf.me, server)
+			args := &RequestVoteArgs{}
+			args.CandidateId = rf.me
+			args.Term = currentTerm
+			args.LastLogTerm = lastLog.Term
+			args.LastLogIndex = lastLog.Index
 			reply := &RequestVoteReply{}
 			rf.sendRequestVote(server, args, reply)
-			ch <- reply.VoteGranted
 			rf.mu.Lock()
-			if reply.Term > currentTerm {
+			if rf.currentTerm < reply.Term {
+				rf.currentTerm = reply.Term
 				rf.voteFor = -1
+				rf.changeRole(FOLLOWER)
 			}
 			rf.mu.Unlock()
-		}(server, votesCh, args)
+			ch <- reply.VoteGranted
+		}(server, votesCh)
 	}
 
 	for {
@@ -123,47 +143,20 @@ func (rf *Raft) startElection() {
 		if r == true {
 			granted += 1
 		}
+		// Once get the majority vote, candidate can become the leader
 		if finished == len(rf.peers) || granted > len(rf.peers)/2 || finished-granted > len(rf.peers)/2 {
 			break
 		}
 	}
 
 	rf.mu.Lock()
-	if args.Term == rf.currentTerm && granted >= len(rf.peers)/2+1 && rf.role == CANDIDATE {
-		DPrintf("Server %d become a leader in term %d \n", rf.me, args.Term)
+	// Make sure current server is still a candidate before becoming a leader
+	if currentTerm == rf.currentTerm && granted >= len(rf.peers)/2+1 && rf.role == CANDIDATE {
+		DPrintf("Server %d become a leader in term %d \n", rf.me, currentTerm)
 		rf.changeRole(LEADER)
 	} else {
-		DPrintf("Server %d fail to become a leader in term %d \n", rf.me, args.Term)
+		DPrintf("Server %d fail to become a leader in term %d \n", rf.me, currentTerm)
+		rf.resetElectionTimer()
 	}
 	rf.mu.Unlock()
-}
-
-func (rf *Raft) sendHeartbeat() {
-	rf.mu.Lock()
-	if rf.role != LEADER {
-		rf.mu.Unlock()
-		return
-	}
-	currentTerm := rf.currentTerm
-	rf.resetHeartbeatTimer()
-	rf.mu.Unlock()
-	for server := 0; server < len(rf.peers); server++ {
-		if server == rf.me {
-			continue
-		}
-		go func(server int) {
-			args := &AppendEntriesArgs{}
-			args.Term = currentTerm
-			args.LeaderId = rf.me
-			reply := &AppendEntriesReply{}
-			rf.sendAppendEntries(server, args, reply)
-			rf.mu.Lock()
-			if reply.Success == false && rf.role == LEADER {
-				rf.changeRole(FOLLOWER)
-				rf.voteFor = -1
-				rf.currentTerm = reply.Term
-			}
-			rf.mu.Unlock()
-		}(server)
-	}
 }
