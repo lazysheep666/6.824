@@ -24,34 +24,37 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	currentTerm := rf.currentTerm
-	voteFor := rf.voteFor
-
-	vote := false
-	isLogUpdate := rf.checkLogUpdate(args.LastLogIndex, args.LastLogTerm)
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 
 	// refuse to vote if currentTerm > args.term
-	if args.Term > currentTerm {
-		vote = true
-	} else if args.Term == currentTerm {
-		if (voteFor == -1 || voteFor == args.CandidateId) && isLogUpdate {
-			vote = true
-		}
-	} else {
-		vote = isLogUpdate
-	}
-	rf.currentTerm = max(currentTerm, args.Term)
-
-	if vote {
-		reply.VoteGranted = true
-		rf.voteFor = args.CandidateId
-		rf.changeRole(FOLLOWER)
-		DPrintf("Server %d agree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
-	} else {
-		reply.VoteGranted = false
+	if rf.currentTerm > args.Term {
 		DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
+		return
 	}
-	reply.Term = rf.currentTerm
+	if rf.currentTerm == args.Term {
+		// Server Already vote for other server in same term
+		if rf.voteFor != -1 && rf.voteFor != args.CandidateId {
+			DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
+			return
+		}
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.voteFor = -1
+		rf.changeRole(FOLLOWER)
+	}
+	isLogOk := rf.checkLogUpdate(args.LastLogIndex, args.LastLogTerm)
+	if !isLogOk {
+		DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
+		return
+	}
+	rf.currentTerm = args.Term
+	rf.voteFor = args.CandidateId
+	reply.VoteGranted = true
+	rf.changeRole(FOLLOWER)
+	DPrintf("Server %d agree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
 }
 
 // Send RPC Call

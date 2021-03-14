@@ -339,7 +339,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 			select {
 			case <-rf.electionTimer.C:
-				rf.startElection()
+				go rf.startElection()
 			case <-rf.heartbeatTimer.C:
 				rf.sendHeartbeat()
 			}
