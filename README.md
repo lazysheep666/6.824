@@ -1,6 +1,6 @@
 # 6.824.
 
-Compelete List
+Progress List
 
 - [x] Lab1 Map Reduce
 - [ ] Lab2 Raft
