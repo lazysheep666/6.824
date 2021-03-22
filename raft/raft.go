@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -95,14 +97,17 @@ type LogEntry struct {
 	Command interface{}
 }
 
+// Change the role of current server
 func (rf *Raft) changeRole(role Role) {
 	rf.role = role
 	if role == CANDIDATE {
 		rf.currentTerm++
 		rf.resetElectionTimer()
 		rf.voteFor = rf.me
+		rf.persist()
 	} else if role == FOLLOWER {
 		rf.resetElectionTimer()
+		rf.persist()
 	} else if role == LEADER {
 		lastIdx := rf.getLastLog().Index
 		for i, _ := range rf.nextIndex {
@@ -115,6 +120,7 @@ func (rf *Raft) changeRole(role Role) {
 	}
 }
 
+// Get the last log entry of current server
 func (rf *Raft) getLastLog() LogEntry {
 	entry := LogEntry{}
 	if len(rf.logEntries) == 0 {
@@ -133,7 +139,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 
-	// Your code here (2A).
 	if rf.role == LEADER {
 		isleader = true
 	} else {
@@ -158,6 +163,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logEntries)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -180,6 +192,17 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var logEntries []LogEntry
+	d.Decode(&currentTerm)
+	d.Decode(&voteFor)
+	d.Decode(&logEntries)
+	rf.currentTerm = currentTerm
+	rf.voteFor = voteFor
+	rf.logEntries = logEntries
 }
 
 //
@@ -223,7 +246,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.role == LEADER
 
 	if isLeader {
-		isLeader = true
 		log := LogEntry{}
 		log.Command = command
 		log.Term = rf.currentTerm
@@ -231,6 +253,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = log.Index
 		term = log.Term
 		rf.logEntries = append(rf.logEntries, log)
+		rf.persist()
 		// reset heartbeat before sending append entry request
 		rf.resetHeartbeatTimer()
 		// sending append entry request
@@ -247,9 +270,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // Apply the log when log is committed
 func (rf *Raft) doApplyMsg() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.lastApplied >= rf.commitIndex {
+		for rf.lastApplied >= rf.commitIndex {
 			rf.applyCon.Wait()
 		}
 		for s := rf.lastApplied + 1; s <= rf.commitIndex; s++ {
@@ -336,7 +359,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections and send heartbeat
 	go func() {
-		for {
+		for !rf.killed() {
 			select {
 			case <-rf.electionTimer.C:
 				go rf.startElection()

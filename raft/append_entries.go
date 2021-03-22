@@ -33,56 +33,57 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Always change to follower if args.term >= rf.currentTerm
 	// if current server is leader, since there is only one leader in same term
 	// args.term must greater than current term
-	rf.changeRole(FOLLOWER)
 	rf.currentTerm = max(rf.currentTerm, args.Term)
+	rf.changeRole(FOLLOWER)
 	reply.Term = rf.currentTerm
 	DPrintf("Server %d receive entries %v from %d in term %d at %v", rf.me, args.Entries, args.LeaderId, args.Term, time.Now())
 	if rf.voteFor != args.LeaderId {
 		rf.voteFor = -1
 	}
-	// Reply false if log doesn’t contain an entry at prevLogIndex
+
+	// Reply false if log does not contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
 	logMatch := args.PrevLogIndex == 0 || (args.PrevLogIndex-1 < len(rf.logEntries) && rf.logEntries[args.PrevLogIndex-1].Term == args.PrevLogTerm)
-	if !logMatch {
-		return
-	}
-	reply.Success = true
-	conflictIdx := -1
-	isConflict := false
-	// If an existing entry conflicts with a new one (same index
-	// but different terms), delete the existing entry and all that
-	// follow it
-	for _, entry := range args.Entries {
-		if entry.Index-1 < len(rf.logEntries) {
-			if entry.Term != rf.logEntries[entry.Index-1].Term {
-				isConflict = true
-				conflictIdx = entry.Index
-				rf.logEntries = rf.logEntries[:conflictIdx-1]
-				break
-			}
-		} else {
-			rf.logEntries = append(rf.logEntries, entry)
-		}
-	}
-	// Append any new entries not already in the log
-	if isConflict {
-		beginIndex := rf.getLastLog().Index
+	if logMatch {
+		reply.Success = true
+		conflictIdx := -1
+		isConflict := false
+		// If an existing entry conflicts with a new one (same index
+		// but different terms), delete the existing entry and all that
+		// follow it
 		for _, entry := range args.Entries {
-			if entry.Index > beginIndex {
+			if entry.Index-1 < len(rf.logEntries) {
+				if entry.Term != rf.logEntries[entry.Index-1].Term {
+					isConflict = true
+					conflictIdx = entry.Index
+					rf.logEntries = rf.logEntries[:conflictIdx-1]
+					break
+				}
+			} else {
 				rf.logEntries = append(rf.logEntries, entry)
 			}
 		}
+		// Append any new entries not already in the log
+		if isConflict {
+			beginIndex := rf.getLastLog().Index
+			for _, entry := range args.Entries {
+				if entry.Index > beginIndex {
+					rf.logEntries = append(rf.logEntries, entry)
+				}
+			}
+		}
+		DPrintf("Server %d log become %v\n", rf.me, rf.logEntries)
+		curCommitIdx := rf.commitIndex
+		// If leaderCommit > commitIndex, set commitIndex =
+		// min(leaderCommit, index of last new entry)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, rf.getLastLog().Index)
+		}
+		if rf.commitIndex > curCommitIdx {
+			rf.applyCon.Signal()
+		}
 	}
-	DPrintf("Server %d log become %v\n", rf.me, rf.logEntries)
-	curCommitIdx := rf.commitIndex
-	// If leaderCommit > commitIndex, set commitIndex =
-	// min(leaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, rf.getLastLog().Index)
-	}
-	if rf.commitIndex > curCommitIdx {
-		rf.applyCon.Signal()
-	}
+	rf.persist()
 }
 
 func (rf *Raft) requestAppendEntries(server int, isHeartBeat bool) {
@@ -138,9 +139,9 @@ func (rf *Raft) handleAppendEntriesRes(server int, args *AppendEntriesArgs, repl
 	// Discover server with higher term
 	// Change to follower
 	if reply.Term > args.Term {
-		rf.changeRole(FOLLOWER)
 		rf.voteFor = -1
 		rf.currentTerm = max(rf.currentTerm, reply.Term)
+		rf.changeRole(FOLLOWER)
 		return false
 	}
 
@@ -152,20 +153,21 @@ func (rf *Raft) handleAppendEntriesRes(server int, args *AppendEntriesArgs, repl
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		isApplied = rf.updateCommitForLeader()
 	} else {
-		rf.nextIndex[server] = rf.nextIndex[server] - 1
+		rf.nextIndex[server] = max(rf.nextIndex[server]-1, 1)
 		isContinue = true
 	}
+	// Applied the new logs
 	if isApplied {
 		rf.applyCon.Signal()
 	}
 	return isContinue
 }
 
+// Update the commit index based on matchIndex for Leader
 func (rf *Raft) updateCommitForLeader() bool {
-	beginIndex := rf.commitIndex + 1
 	lastCommittedIndex := -1
 	updated := false
-	for ; beginIndex <= rf.getLastLog().Index; beginIndex++ {
+	for beginIndex := rf.commitIndex + 1; beginIndex <= rf.getLastLog().Index; beginIndex++ {
 		granted := 1
 		for server := 0; server < len(rf.peers); server++ {
 			if server == rf.me {

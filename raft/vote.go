@@ -32,8 +32,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
 		return
 	}
+
+	// refuse to vote
+	// since server already vote for other server in same term
 	if rf.currentTerm == args.Term {
-		// Server Already vote for other server in same term
 		if rf.voteFor != -1 && rf.voteFor != args.CandidateId {
 			DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
 			return
@@ -45,6 +47,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteFor = -1
 		rf.changeRole(FOLLOWER)
 	}
+
 	isLogOk := rf.checkLogUpdate(args.LastLogIndex, args.LastLogTerm)
 	if !isLogOk {
 		DPrintf("Server %d disagree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
@@ -53,6 +56,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.currentTerm = args.Term
 	rf.voteFor = args.CandidateId
 	reply.VoteGranted = true
+	reply.Term = rf.currentTerm
 	rf.changeRole(FOLLOWER)
 	DPrintf("Server %d agree vote to server %d in term %d\n", rf.me, args.CandidateId, args.Term)
 }
