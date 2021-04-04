@@ -77,18 +77,20 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	role           Role
-	voteFor        int
-	currentTerm    int
-	heartbeatTimer *time.Timer
-	electionTimer  *time.Timer
-	logEntries     []LogEntry
-	commitIndex    int
-	lastApplied    int
-	nextIndex      []int
-	matchIndex     []int
-	applyChan      chan ApplyMsg
-	applyCon       *sync.Cond
+	role             Role
+	voteFor          int
+	currentTerm      int
+	heartbeatTimer   *time.Timer
+	electionTimer    *time.Timer
+	logEntries       []LogEntry
+	commitIndex      int
+	lastApplied      int
+	nextIndex        []int
+	matchIndex       []int
+	applyChan        chan ApplyMsg
+	applyCon         *sync.Cond
+	LastIncludeIndex int
+	LastIncludeTerm  int
 }
 
 type LogEntry struct {
@@ -130,6 +132,48 @@ func (rf *Raft) getLastLog() LogEntry {
 		entry = rf.logEntries[len(rf.logEntries)-1]
 	}
 	return entry
+}
+
+// Get the log at given index
+func (rf *Raft) getLogAtIdx(idx int) (LogEntry, bool) {
+	if idx == 0 {
+		return LogEntry{}, true
+	} else if len(rf.logEntries) == 0 {
+		return LogEntry{}, false
+	} else if rf.logEntries[0].Index > idx || idx > rf.getLastLog().Index {
+		return LogEntry{}, false
+	}
+	offset := idx - rf.logEntries[0].Index
+	return rf.logEntries[offset], true
+}
+
+// Get the index of first log at given term
+func (rf *Raft) firstIdxWithTerm(term int) int {
+	findTerm := false
+	index := -1
+	for i := len(rf.logEntries) - 1; i >= 0; i-- {
+		if rf.logEntries[i].Term != term && findTerm {
+			index = rf.logEntries[i+1].Index
+			break
+		}
+		if rf.logEntries[i].Term == term {
+			findTerm = true
+		}
+	}
+	return index
+}
+
+// Get the index of last log at given term
+func (rf *Raft) lastIdxWithTerm(term int) int {
+	for i := len(rf.logEntries) - 1; i >= 0; i-- {
+		if rf.logEntries[i].Term < term {
+			return -1
+		}
+		if rf.logEntries[i].Term == term {
+			return rf.logEntries[i].Index
+		}
+	}
+	return -1
 }
 
 // return currentTerm and whether this server
@@ -206,26 +250,6 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 //
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
-
-//
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -249,7 +273,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		log := LogEntry{}
 		log.Command = command
 		log.Term = rf.currentTerm
-		log.Index = len(rf.logEntries) + 1
+		log.Index = rf.getLastLog().Index + 1
 		index = log.Index
 		term = log.Term
 		rf.logEntries = append(rf.logEntries, log)
@@ -277,9 +301,13 @@ func (rf *Raft) doApplyMsg() {
 		}
 		for s := rf.lastApplied + 1; s <= rf.commitIndex; s++ {
 			DPrintf("Server %d apply log %d \n", rf.me, s)
+			log, find := rf.getLogAtIdx(s)
+			if !find || log.Index <= rf.LastIncludeIndex {
+				continue
+			}
 			applyMsg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logEntries[s-1].Command,
+				Command:      log.Command,
 				CommandIndex: s,
 			}
 			rf.mu.Unlock()
@@ -350,6 +378,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.applyChan = applyCh
 	rf.applyCon = sync.NewCond(&rf.mu)
+	rf.LastIncludeIndex = -1
+	rf.LastIncludeTerm = -1
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex = append(rf.nextIndex, 1)
 		rf.matchIndex = append(rf.matchIndex, 0)

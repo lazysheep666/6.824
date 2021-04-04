@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"os"
 	"time"
 )
 
@@ -18,12 +19,18 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	SIndex  int
 }
 
 // RPC Call
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.SIndex = -1
+	reply.XTerm = -1
+	reply.XIndex = -1
 	reply.Success = false
 	// Ignore the request if term < currentTerm
 	if rf.currentTerm > args.Term {
@@ -43,8 +50,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if log does not contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
-	logMatch := args.PrevLogIndex == 0 || (args.PrevLogIndex-1 < len(rf.logEntries) && rf.logEntries[args.PrevLogIndex-1].Term == args.PrevLogTerm)
-	if logMatch {
+	log, find := rf.getLogAtIdx(args.PrevLogIndex)
+	logMatch := args.PrevLogIndex == 0 || args.PrevLogIndex == rf.LastIncludeIndex || (find && log.Term == args.PrevLogTerm)
+	if !logMatch {
+		if !find {
+			reply.SIndex = len(rf.logEntries) + 1
+			if rf.LastIncludeIndex != -1 {
+				reply.SIndex = len(rf.logEntries) + rf.LastIncludeIndex + 1
+			}
+		} else {
+			reply.XTerm = log.Term
+			reply.XIndex = rf.firstIdxWithTerm(log.Term)
+		}
+	} else {
 		reply.Success = true
 		conflictIdx := -1
 		isConflict := false
@@ -52,11 +70,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// but different terms), delete the existing entry and all that
 		// follow it
 		for _, entry := range args.Entries {
-			if entry.Index-1 < len(rf.logEntries) {
-				if entry.Term != rf.logEntries[entry.Index-1].Term {
+			localEntry, find := rf.getLogAtIdx(entry.Index)
+			if find {
+				if entry.Term != localEntry.Term {
 					isConflict = true
-					conflictIdx = entry.Index
-					rf.logEntries = rf.logEntries[:conflictIdx-1]
+					conflictIdx = localEntry.Index - rf.logEntries[0].Index //localIndex
 					break
 				}
 			} else {
@@ -65,6 +83,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		// Append any new entries not already in the log
 		if isConflict {
+			rf.logEntries = rf.logEntries[:conflictIdx]
 			beginIndex := rf.getLastLog().Index
 			for _, entry := range args.Entries {
 				if entry.Index > beginIndex {
@@ -96,7 +115,11 @@ func (rf *Raft) requestAppendEntries(server int, isHeartBeat bool) {
 	}
 	nextIndex := rf.nextIndex[server]
 	for i := rf.nextIndex[server]; i <= rf.getLastLog().Index; i++ {
-		entry := rf.logEntries[i-1]
+		entry, find := rf.getLogAtIdx(i)
+		if !find {
+			// todo
+			os.Exit(-1)
+		}
 		logEntries = append(logEntries, entry)
 	}
 	if len(logEntries) == 0 && isHeartBeat == false {
@@ -153,7 +176,19 @@ func (rf *Raft) handleAppendEntriesRes(server int, args *AppendEntriesArgs, repl
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		isApplied = rf.updateCommitForLeader()
 	} else {
-		rf.nextIndex[server] = max(rf.nextIndex[server]-1, 1)
+		if reply.SIndex != -1 {
+			rf.nextIndex[server] = reply.SIndex
+		} else {
+			index := rf.lastIdxWithTerm(reply.XTerm)
+			if index == -1 {
+				rf.nextIndex[server] = reply.XIndex
+			} else {
+				rf.nextIndex[server] = index + 1
+			}
+		}
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
+		}
 		isContinue = true
 	}
 	// Applied the new logs
